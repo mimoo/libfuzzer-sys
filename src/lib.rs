@@ -11,6 +11,7 @@
 
 #![deny(missing_docs, missing_debug_implementations)]
 
+#[cfg(feature = "arbitrary_backend")]
 pub use arbitrary;
 
 extern "C" {
@@ -52,6 +53,12 @@ pub fn initialize(_argc: *const isize, _argv: *const *const *const u8) -> isize 
     }));
     0
 }
+
+#[cfg(feature = "proptest_backend")]
+static EMPTY_SEED: once_cell::sync::Lazy<Vec<u8>> = once_cell::sync::Lazy::new(|| {
+    vec![0u8; 1204];
+});
+
 
 /// Define a fuzz target.
 ///
@@ -113,6 +120,7 @@ pub fn initialize(_argc: *const isize, _argv: *const *const *const u8) -> isize 
 ///     my_crate::convert_color(color);
 /// });
 /// # mod my_crate { fn convert_color(_: super::Rgb) {} }
+#[cfg(feature = "arbitrary_backend")]
 #[macro_export]
 macro_rules! fuzz_target {
     (|$bytes:ident| $body:block) => {
@@ -175,6 +183,60 @@ macro_rules! fuzz_target {
                 Ok(d) => d,
                 Err(_) => return,
             };
+
+            $body
+        }
+    };
+}
+
+#[cfg(feature = "proptest_backend")]
+#[macro_export]
+macro_rules! fuzz_target {
+    (|$bytes:ident| $body:block) => {
+        #[no_mangle]
+        pub extern "C" fn rust_fuzzer_test_input($bytes: &[u8]) {
+            // When `RUST_LIBFUZZER_DEBUG_PATH` is set, write the debug
+            // formatting of the input to that file. This is only intended for
+            // `cargo fuzz`'s use!
+            if let Ok(path) = std::env::var("RUST_LIBFUZZER_DEBUG_PATH") {
+                use std::io::Write;
+                let mut file = std::fs::File::create(path)
+                    .expect("failed to create `RUST_LIBFUZZER_DEBUG_PATH` file");
+                writeln!(&mut file, "{:?}", $bytes)
+                    .expect("failed to write to `RUST_LIBFUZZER_DEBUG_PATH` file");
+                return;
+            }
+
+            $body
+        }
+    };
+
+    (|$data:ident: &[u8]| $body:block) => {
+        fuzz_target!(|$data| $body);
+    };
+
+    #[cfg(feature = "proptest_backend")]
+    (|$data:ident: $dty: ty| $body:block) => {
+        #[no_mangle]
+        pub extern "C" fn rust_fuzzer_test_input(bytes: &[u8]) {
+            use proptest::{arbitrary::{self, Arbitrary}, test_runner::{self, TestRunner}};
+
+            // create test runner
+            let mut seed = EMPTY_SEED.clone();
+            seed[..bytes.len()].copy_from_slice(bytes);
+            let passthrough_rng = test_runner::TestRng::from_seed(test_runner::RngAlgorithm::PassThrough, seed);
+
+            let config = test_runner::Default();
+            let mut runner = TestRunner::new(config, passthrough_rng);
+
+            
+
+            let strategy = <$dty as Arbitrary>::arbitrary();
+            let strategy_tree = match strategy.new_tree(&mut runner) {
+                Ok(x) => x,
+                Err(_) => return,
+            };
+            let data = strategy_tree.current();
 
             $body
         }
